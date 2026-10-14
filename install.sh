@@ -244,7 +244,7 @@ for app in "${APPS[@]}"; do
     url="$(curl -fsSL "https://api.github.com/repos/storytold/$app/releases/latest" \
         | jq -r --arg arch "$ARCH" \
             '.assets[]
-             | select(.name | endswith("linux-\($arch).flatpak")))
+             | select(.name | endswith("linux-\($arch).flatpak"))
              | .browser_download_url' \
         | head -n1)" || true
     if [[ -z "${url:-}" ]]; then
