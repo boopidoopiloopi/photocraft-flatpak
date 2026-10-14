@@ -2,7 +2,7 @@
 #
 # craft-apps installer
 #
-#   bash -c "$(curl -sSL https://raw.githubusercontent.com/USER/REPO/main/install.sh)"
+#   bash -c "$(curl -sSL https://raw.githubusercontent.com/boopidoopiloopi/photocraft-flatpak/main/install.sh)"
 #
 # Builds a local flatpak repo from GitHub release bundles of the ArtCraft
 # apps, installs the selected apps from it (user install), and hooks
@@ -30,6 +30,8 @@ if [[ -t 1 ]]; then
 else
     C_G=""; C_Y=""; C_R=""; C_0=""
 fi
+trap 'printf "%s==> Installer failed at line %s%s\n" "$C_R" "${LINENO:-?}" "$C_0" >&2' ERR
+
 info() { printf '%s==>%s %s\n' "$C_G" "$C_0" "$*"; }
 warn() { printf '%s==> %s%s\n' "$C_Y" "$C_0" "$*"; }
 die()  { printf '%s==> ERROR:%s %s\n' "$C_R" "$C_0" "$*" >&2; exit 1; }
@@ -49,7 +51,9 @@ ask() { # ask PROMPT VARNAME — prints the prompt itself so it always shows
 in_list() {
     local needle="$1"; shift
     local x
-    for x in "$@"; do [[ "$x" == "$needle" ]] && return 0; done
+    for x in "$@"; do
+        if [[ "$x" == "$needle" ]]; then return 0; fi
+    done
     return 1
 }
 
@@ -60,7 +64,9 @@ ensure_deps() {
     for c in flatpak curl jq ostree; do
         command -v "$c" >/dev/null 2>&1 || missing+=("$c")
     done
-    [[ ${#missing[@]} -eq 0 ]] && return
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        return 0
+    fi
 
     info "Installing missing tools: ${missing[*]}"
     local -a sudocmd=()
@@ -73,7 +79,7 @@ ensure_deps() {
         "${sudocmd[@]}" pacman -S --needed --noconfirm "${missing[@]}"
     elif command -v apt-get >/dev/null 2>&1; then
         "${sudocmd[@]}" apt-get update -y
-        "${sudocmd[@]}" apt-get install -y "${mсонissing[@]}"
+        "${sudocmd[@]}" apt-get install -y "${missing[@]}"
     elif command -v dnf >/dev/null 2>&1; then
         "${sudocmd[@]}" dnf install -y "${missing[@]}"
     elif command -v zypper >/dev/null 2>&1; then
@@ -94,7 +100,7 @@ parse_selection() { # $1=input  $2=count  -> SELECTED=(1-based indices)
     read -ra tokens <<< "${input//,/ }"
 
     for token in "${tokens[@]}"; do
-        [[ -z "$token" ]] && continue
+        if [[ -z "$token" ]]; then continue; fi
         t="$token"
         is_excl=0
         if [[ "$t" == ^* ]]; then is_excl=1; t="${t:1}"; fi
@@ -111,7 +117,12 @@ parse_selection() { # $1=input  $2=count  -> SELECTED=(1-based indices)
             die "Out of range: '$token'  (pick 1-$n)"
         fi
         for ((i = lo; i <= hi; i++)); do
-            if (( is_excl )); then excl[$i]=1; else incl[$i]=1; have_incl=1; fi
+            if (( is_excl )); then
+                excl[$i]=1
+            else
+                incl[$i]=1
+                have_incl=1
+            fi
         done
     done
     if (( ! have_incl )); then
@@ -122,7 +133,10 @@ parse_selection() { # $1=input  $2=count  -> SELECTED=(1-based indices)
             SELECTED+=("$i")
         fi
     done
-    [[ ${#SELECTED[@]} -eq 0 ]] && die "Nothing selected."
+    if [[ ${#SELECTED[@]} -eq 0 ]]; then
+        die "Nothing selected."
+    fi
+    return 0
 }
 
 # -------------------------------------------------------------- repo -------
@@ -154,9 +168,17 @@ cd "$DIR"
 NEW_INSTALL=1
 if [[ -f apps.list || -d repo ]]; then NEW_INSTALL=0; fi
 
+# What does this repo currently track? apps.list if present, otherwise
+# reconstruct from the refs actually inside the local repo.
 CURRENT=()
 if [[ -f apps.list ]]; then
     mapfile -t CURRENT < <(grep -v '^[[:space:]]*$' apps.list 2>/dev/null || true)
+elif [[ -d repo/objects ]]; then
+    for app in "${CAT_NAMES[@]}"; do
+        if [[ -n "$(repo_appids_for "$app")" ]]; then
+            CURRENT+=("$app")
+        fi
+    done
 fi
 
 echo
@@ -192,23 +214,25 @@ done
 
 ADD=(); REMOVE=()
 for app in "${DESIRED[@]}"; do
-    in_list "$app" "${CURRENT[@]}" || ADD+=("$app")
+    if ! in_list "$app" "${CURRENT[@]}"; then ADD+=("$app"); fi
 done
 if [[ $NEW_INSTALL -eq 0 ]]; then
     for app in "${CURRENT[@]}"; do
-        in_list "$app" "${DESIRED[@]}" || REMOVE+=("$app")
+        if ! in_list "$app" "${DESIRED[@]}"; then REMOVE+=("$app"); fi
     done
 fi
 
 echo
 info "Plan for $DIR"
 echo "    repo tracks : ${DESIRED[*]}"
-[[ ${#ADD[@]} -gt 0 ]]    && echo "    add+install : ${ADD[*]}"
-[[ ${#REMOVE[@]} -gt 0 ]] && echo "    remove      : ${REMOVE[*]}"
-[[ $NEW_INSTALL -eq 1 ]]  && echo "    runtime     : org.freedesktop.Platform (from Flathub if missing)"
+if [[ ${#ADD[@]} -gt 0 ]]; then echo "    add+install : ${ADD[*]}"; fi
+if [[ ${#REMOVE[@]} -gt 0 ]]; then echo "    remove      : ${REMOVE[*]}"; fi
+if [[ $NEW_INSTALL -eq 1 ]]; then
+    echo "    runtime     : org.freedesktop.Platform (from Flathub if missing)"
+fi
 echo
 ask "Proceed? [Y/n] " YN
-[[ "$YN" =~ ^[Nn] ]] && die "Aborted."
+if [[ "$YN" =~ ^[Nn] ]]; then die "Aborted."; fi
 
 printf '%s\n' "${DESIRED[@]}" > apps.list
 
@@ -340,7 +364,9 @@ if [[ ${#ADD[@]} -gt 0 ]]; then
                 flatpak install --user -y "$REMOTE_NAME" "$appid"
             fi
         done < <(repo_appids_for "$app")
-        [[ $found -eq 0 ]] && warn "$app: no release yet — retried on every 'flatpak update'"
+        if [[ $found -eq 0 ]]; then
+            warn "$app: no release yet — retried on every 'flatpak update'"
+        fi
     done
 fi
 
