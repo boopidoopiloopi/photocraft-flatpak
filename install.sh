@@ -34,10 +34,14 @@ info() { printf '%s==>%s %s\n' "$C_G" "$C_0" "$*"; }
 warn() { printf '%s==> %s%s\n' "$C_Y" "$C_0" "$*"; }
 die()  { printf '%s==> ERROR:%s %s\n' "$C_R" "$C_0" "$*" >&2; exit 1; }
 
-ask() { # ask PROMPT VARNAME — reads from the terminal so `curl | bash` works
+ask() { # ask PROMPT VARNAME — prints the prompt itself so it always shows
     local __in=""
-    if ! read -rp "$1" __in </dev/tty 2>/dev/null; then
-        read -rp "$1" __in || __in=""
+    if [[ -w /dev/tty ]]; then
+        printf '%s' "$1" > /dev/tty
+        read -r __in < /dev/tty || __in=""
+    else
+        printf '%s' "$1" >&2
+        read -r __in || __in=""
     fi
     printf -v "$2" '%s' "$__in"
 }
