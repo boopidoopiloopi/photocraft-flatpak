@@ -8,6 +8,7 @@
 # apps, installs the selected apps from it (user install), and hooks
 # `flatpak update` in bash + fish so the repo refreshes from GitHub first.
 # Re-running the installer on the same directory lets you add/remove apps.
+# The selection at the app prompt is the FULL SET to track (yay-style).
 
 set -eo pipefail
 
@@ -187,7 +188,7 @@ if [[ $NEW_INSTALL -eq 1 ]]; then
     echo "    (e.g. '1 2 3', '1-3' or '^4' — press Enter for all)"
 else
     info "Existing craft-apps repo found. Current apps are marked [x]."
-    echo "    Choose what to KEEP (e.g. '1 3', '^2' — press Enter to keep current)."
+    echo "    Type the FULL SET to track (e.g. '1 3 5', '^2' — Enter = keep current)."
 fi
 echo
 for i in "${!CAT_NAMES[@]}"; do
@@ -281,16 +282,22 @@ for app in "${APPS[@]}"; do
     fi
 
     file="downloads/$(basename "$url")"
-    if [[ -f "$file" ]]; then
+    ref="$(ostree --repo="$REPO" refs 2>/dev/null \
+        | awk -F/ -v a="$app" '$1 == "app" && $2 ~ ("\\." a "$")' \
+        | head -n1 || true)"
+
+    if [[ -f "$file" && -n "$ref" ]]; then
         echo "== $app: already have $(basename "$url")"
     else
-        echo "== $app: downloading $(basename "$url")"
-        if ! curl -fL --progress-bar -o "$file.part" "$url"; then
-            echo "!! $app: download failed - skipping" >&2
-            rm -f "$file.part"
-            continue
+        if [[ ! -f "$file" ]]; then
+            echo "== $app: downloading $(basename "$url")"
+            if ! curl -fL --progress-bar -o "$file.part" "$url"; then
+                echo "!! $app: download failed - skipping" >&2
+                rm -f "$file.part"
+                continue
+            fi
+            mv "$file.part" "$file"
         fi
-        mv "$file.part" "$file"
         echo "== $app: importing into repo"
         flatpak build-import-bundle "$REPO" "$file"
     fi
@@ -338,8 +345,20 @@ if [[ ${#REMOVE[@]} -gt 0 ]]; then
     flatpak build-update-repo repo
 fi
 
-# ------------------------------------------------- fetch & install news ----
-if [[ ${#ADD[@]} -gt 0 ]]; then
+# ------------------------------------------------- fetch missing apps ------
+# Refresh from GitHub if anything new was added, or if a tracked app is
+# somehow missing from the repo (self-heal).
+need_refresh=0
+if [[ ${#ADD[@]} -gt 0 ]]; then need_refresh=1; fi
+if [[ $need_refresh -eq 0 ]]; then
+    for app in "${DESIRED[@]}"; do
+        if [[ -z "$(repo_appids_for "$app")" ]]; then
+            need_refresh=1
+            break
+        fi
+    done
+fi
+if [[ $need_refresh -eq 1 ]]; then
     echo
     ./refresh-craft-apps.sh
 fi
@@ -349,30 +368,28 @@ flatpak --user remote-add --if-not-exists flathub \
     https://dl.flathub.org/repo/flathub.flatpakrepo
 
 info "registering local repo as remote '$REMOTE_NAME'"
-flatpak --user remote-delete "$REMOTE_NAME" 2>/dev/null || true
-flatpak --user remote-add --no-gpg-verify "$REMOTE_NAME" "file://$DIR/repo"
+flatpak --user remote-add --if-not-exists --no-gpg-verify "$REMOTE_NAME" "file://$DIR/repo"
+flatpak --user remote-modify --no-gpg-verify --url="file://$DIR/repo" "$REMOTE_NAME" 2>/dev/null || true
 
-if [[ ${#ADD[@]} -gt 0 ]]; then
-    for app in "${ADD[@]}"; do
-        found=0
-        while IFS= read -r appid; do
-            found=1
-            if flatpak --user info "$appid" >/dev/null 2>&1; then
-                info "$appid is already installed"
-            else
-                info "installing $appid"
-                flatpak install --user -y "$REMOTE_NAME" "$appid"
-            fi
-        done < <(repo_appids_for "$app")
-        if [[ $found -eq 0 ]]; then
-            warn "$app: no release yet — retried on every 'flatpak update'"
-        fi
-    done
-fi
+# ------------------------------------------------- install tracked apps ----
+for app in "${DESIRED[@]}"; do
+    found=0
+    while IFS= read -r appid; do
+        found=1
+        info "installing/updating $appid"
+        flatpak install --user -y --or-update "$REMOTE_NAME" "$appid" \
+            || warn "could not install $appid"
+    done < <(repo_appids_for "$app")
+    if [[ $found -eq 0 ]]; then
+        warn "$app: no release in the repo yet — will retry on 'flatpak update'"
+    fi
+done
 
 # ----------------------------------------------------------- shell hooks ---
 BASHRC="$HOME/.bashrc"
 touch "$BASHRC"
+# ensure a trailing newline so the appended block can't fuse with the last line
+if [ -n "$(tail -c 1 "$BASHRC")" ]; then echo >> "$BASHRC"; fi
 sed -i '/^# >>> craft-apps flatpak wrapper >>>$/,/^# <<< craft-apps flatpak wrapper <<<$/{d}' "$BASHRC"
 {
     echo
